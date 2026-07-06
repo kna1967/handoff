@@ -1,63 +1,66 @@
-# report: sync_alerts_from_notes.py 登録時既成立アラートのreached扱いパッチ(2026-07-06)
+# report: alert_system.py 発火の一回性(状態遷移時のみ通知)パッチ(2026-07-06)
 
 ## タスク
-frontmatterのentry_probe/entry_fullをalerts.dbへupsertする際、登録時点で現在値が既に
-ターゲット価格以下だと初回チェックで「今到達した」かのように誤発火・Slack通知される問題への対応。
-実例: 6637(entry_probe 3,937円/entry_full 3,700円、分析時点の現在値3,665円)。
+`check_all_alerts()`がlast_triggered_atを参照せず毎回再評価するため、条件が成立し続ける限り
+cron実行のたびに発火・Slack通知されていた問題への対応(前回パッチ検証で実機確認済み。
+reached登録直後の6637アラートがcheckで再検出された)。設計意図(2026-05-28確立)である
+「発火したアラートは削除して再登録するまで終わり」を実装で担保する。
 
 ## 実装要点
-- 対象は指示どおり `sync_alerts_from_notes.py` のみ。`alert_system.py`本体・alerts.dbスキーマ・
-  port 8081系は無変更(スキーマ変更は不要だったため報告して止める事態にはならず)。
-- 新規関数 `get_latest_close(sec_code)`: `dashboard/data/<sec_code>.json` の `price` フィールドを
-  優先し、無ければ `alert_system._jq_client()` / `alert_system._get_latest_close()`(既存の
-  J-Quants取得経路をそのまま流用、AdjC優先で分割調整済み)にフォールバック。取得不能なら`None`。
-- `build_alert_specs()` に `latest_close` 引数を追加し、entry_probe/entry_full の各specに
-  `"reached"`(最新終値が閾値以下か)を付与。
-- `sync_one()` の**新規INSERT時のみ**、`reached=True` なら既存カラム
-  `last_triggered_at`/`acknowledged_at` に登録時刻を設定して「発火済み・ack済み」の状態で
-  登録(スキーマ変更なし)。ログに「登録時既成立のためreached扱いで登録（通知スキップ）」を明記。
-  終値取得不能時は従来通り未発火(安全側)。
-- **UPDATE(既存auto行の条件/note更新)ではreached再判定を行わない**(既存の発火履歴・ack状態を
-  保護するため。スコープを「登録(INSERT)時のみ」に限定)。
+- 対象は指示どおり `alert_system.py` のみ。`sync_alerts_from_notes.py`・alerts.dbスキーマ・
+  ダッシュボード(port 8081系)・cron設定は無変更。
+- `check_all_alerts()`のループ先頭に `if a["last_triggered_at"]: already_fired.append(a); continue`
+  を追加。active=1かつlast_triggered_at設定済みのアラートは、judge関数の呼び出し(=J-Quants等
+  への問い合わせ)自体をスキップし、判定・通知の対象から外す。全alert_type共通。
+- ログを「発火: N / 既発火スキップ: N / その他スキップ(未知タイプ・エラー): N」に分離し、
+  既発火スキップの各行を`[SKIP-FIRED]`として個別出力(件数・内訳とも可視化)。
+- **発火時にlast_triggered_atへ書き込む処理の有無を確認**: 既存の`_mark_triggered(a["id"])`
+  が発火判定直後に既に呼ばれており、追加実装は不要だった(確認のみ)。
+- `acknowledged_at`には一切触れていない(ack判断はダッシュボード側の責務のまま)。
+- モジュール冒頭・`check_all_alerts`docstringに「発火の一回性」の設計意図と運用
+  (再監視したい場合は削除して登録し直す)を明記。
+- **demoモード(`cli_demo`)は指示どおり無変更**。ただし確認の結果、現状のdemoは
+  `add_alert()`で実際にDBへ書き込み、`check_all_alerts`実行後に`deactivate_alert()`で
+  active=0にする(last_triggered_atは設定されたまま残る)という、DB状態を一時的に
+  変更する挙動になっている。これは「デモ発火はDB状態を変更しない」という想定とは異なる
+  既存の実挙動であり、指示どおり変更はせずここに現象として報告する。
 
-## 検証結果
-- 事前に6637・1980の既存auto価格アラート(各2件)を削除し、新規INSERTパスを実際に通す形で検証。
-- **6637**(現在値3,665円 < entry_probe 3,937円・entry_full 3,700円、条件成立済み):
-  `--dry-run`・実行(`--test-slack`)いずれもentry_probe/entry_fullの2件で
-  「登録時既成立のためreached扱いで登録（通知スキップ）」ログを確認。実行後、DBで両行の
-  `last_triggered_at`/`acknowledged_at`が登録時刻で設定され、`active=1`(ダッシュボードには
-  通常どおり表示され「アラート到達」表示になる)であることを確認。
-- **1980**(現在値2,833円 > entry_probe 2,557円・entry_full 2,294円、条件未成立):
-  同様に新規INSERTを発生させたが、reachedログは出ず、DB上も`last_triggered_at=NULL`のまま
-  (従来通り未発火登録)であることを確認。
-- 5471等、対象外の既存レコード(48件)への影響がないことを確認(全体のactiveレコード数は
-  操作前後で52件のまま、5471のlast_triggered_at等も無変更)。
-- `--dry-run`を再実行し、新規0件(冪等)であることを確認。
+## 検証結果(Slack実送信なし、`notify_slack=False`で実施)
+- **6637の回帰確認**: reached済みアラート2件(id 93, 94)が`[SKIP-FIRED]`として正しくスキップ
+  されることを確認(前回パッチ検証時は同じ状態で「再検出」されていた→今回のパッチで解消)。
+  同時に、本パッチ以前から既発火状態だった無関係の既存アラート(6232のema、id 40)も同様に
+  正しくスキップされることを確認(全alert_type共通であることの実証)。
+- **状態遷移の実データ再現**: 7203(トヨタ)の実際の終値(2,828円、J-Quants取得)を用いて
+  一時テストアラートを作成。
+  1. 閾値を終値-1,000円(不成立)で登録 → 1回目check: 未発火・スキップもされず通常判定
+     (triggered=[]、既発火スキップにも含まれない)。
+  2. 条件を終値+1,000円(成立)へ直接UPDATE → 2回目check: 発火(triggered=[95])、DB上で
+     `last_triggered_at`が記録されたことを確認(`acknowledged_at`はNoneのまま=無変更)。
+  3. 3回目check: 既発火スキップ(`[SKIP-FIRED] alert#95 ...`)として正しく対象外化。
+  検証後、テスト用アラート(id 95)を削除し、alerts.dbの行数を90件(検証前と同一)に復元。
+- **既存の未発火アラート49件は従来通り判定**: 52件中、既発火3件(6232×1、6637×2)を除く
+  49件が通常どおりjudge関数で評価され(発火0件・エラー0件)、スキップ対象を不当に広げて
+  いないことを確認。
+- **他レコードへの影響なし**: 検証前後でalerts全体行数(90件)・active件数(52件)は不変。
+  6232(id 40)・6637(id 93,94)のlast_triggered_atも操作前後で変化なし(値を再確認済み)。
 
-## 既知の制約(重要・要ケンジ判断)
-`alert_system.check_all_alerts()` は `last_triggered_at` を一切参照せず、実行の都度
-`judge_price`で終値を再評価して発火要否とSlack通知要否を決める(コード確認・実機検証で確認済み:
-`check_all_alerts(notify_slack=False)` を実行したところ、reached登録直後の6637アラート2件が
-「発火」として再検出された)。そのため、**本パッチが防ぐのは「登録直後の初回発火」のみ**であり、
-条件が成立し続ける限り、以後の`alert_system.py check`(cron)実行でのSlack通知は本パッチ後も
-従来どおり発生し得る。恒久的な抑制には`alert_system.py`の`check_all_alerts`側の変更
-(例: 状態遷移(未発火→発火)の時だけ通知する等)が必要だが、これは今回の指示範囲外
-(`alert_system.py本体は不変更`)のため未実装。対応要否・実装方針はケンジ判断が必要。
+## 前回パッチとの関係
+前回(sync_alerts_from_notes.py)のreached扱い登録パッチで「防げるのは登録直後の初回発火のみ」
+と報告した既知の制約は、本パッチにより解消された。reached登録された6637のアラートは
+last_triggered_atが設定済みのため、以後のcheck_all_alerts実行では恒久的にスキップされ、
+再度Slack通知されることはない(前回報告の懸念点を本パッチで手当て済み)。
 
 ## 制約の遵守
-- 変更ファイルは `sync_alerts_from_notes.py` のみ。`alert_system.py`・alerts.dbスキーマ・
-  port 8081系ダッシュボードコードには一切触れていない
-- 検証のため一時的に6637・1980のauto価格アラート計4件をDELETE→再sync実行で再作成したが、
-  最終状態は「6637=reached登録・1980=従来通り未発火登録」という意図した結果であり、
-  他の対象銘柄・非auto(手動登録)行には一切影響なし
+- 変更ファイルは `alert_system.py` のみ。`sync_alerts_from_notes.py`・alerts.dbスキーマ・
+  ダッシュボードコード・cron設定には一切触れていない
+- 検証のため一時テストアラート(7203、id 95)を作成・条件更新・削除したが、最終的に
+  alerts.dbは検証前と同一状態(90行、52 active)に復元済み
 - 機密情報は含まれていない
 
 ## commit
-- phase3-repo: `9e4dd50`(sync_alerts_from_notes.py reached扱いパッチ)
-- obsidian-vault: `e7ffd1e`(セッション引き継ぎ追記)
+- phase3-repo: `e47d899`(alert_system.py 発火の一回性パッチ)
+- obsidian-vault: `22d78e3`(セッション引き継ぎ追記)
 
 ## ロールバック手順
-- `git -C ~/phase3/phase3-repo revert 9e4dd50`
-- ロールバック後、DBに残る6637の`last_triggered_at`/`acknowledged_at`(reached状態)は
-  データとして残るが実害はない(気になる場合は `UPDATE alerts SET last_triggered_at=NULL,
-  acknowledged_at=NULL WHERE sec_code='6637' AND alert_type='price'` で手動クリア可)
+`git -C ~/phase3/phase3-repo revert e47d899`(スキップロジック追加のみの単純commitのため、
+revertで安全に取り消し可能。DBスキーマ・データへの変更は伴わないため復元は不要)。

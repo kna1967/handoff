@@ -1,45 +1,45 @@
-# 完了報告: 3393 スターティアホールディングス v5.5フル分析(2026-07-11・初回分析)
+# 完了報告: hyena-term 5セッション化＋SH独立ボタン＋handoff銘柄別ファイル化(2026-07-11)
 
 ## 対象
-3393 スターティアホールディングス(東証プライム、表面上は卸売業だが実態は中小企業向けOA機器代理店ロールアップ+SaaS DXプラットフォーマー) — 初回分析
+phase3-repo/webterm(server.py・index.html)＋obsidian-vault/CLAUDE.md。銘柄分析を最大5並列で走らせるための基盤整備(【自走指示・確認不要】)。port 8081系ダッシュボードは不可侵の指示どおり未変更。
 
-## データ取得
-- 一次資料ゲート: 決算資料フォルダなし。fetch_kessan.py(TDnet直近30日走査)も空振り(本決算2026-05-15開示が約2ヶ月前で対象期間外)。Web検索でIR公式サイトを直接特定し、決算短信・決算補足資料・中期経営計画PDFを取得(`/home/ubuntu/決算資料/3393/`)。通期版決算説明資料の専用ページは2〜3トライで発見できずQ3版PDFで代替。ユーザーGO確認後に自走。
-- fetch_stock.py 3393(J-Quants、10年財務・52週レンジ・EMA・信用残)
-- kessan_table.py --code 3393(四半期業績表)
+## 実装要点・差分要約
 
-## 主要な発見
+### タスクA: server.py セッション拡張
+- `SESSIONS`許可リスト(3本: claude/claude2/shell)を`SESSION_CWD`マッピング(6本)に拡張:
+  claude→`~/phase3/phase3-repo`、claude2〜5→`~/obsidian-vault`(分析用・スキル自動発動圏)、shell→`~`。`SESSIONS = set(SESSION_CWD)`で許可リストを維持。
+- pty子プロセスの`tmux new -A -s <session>`に`-c SESSION_CWD[session]`を追加。`-c`は新規作成時のみ有効で既存セッション(claude/claude2/shell)のattachには影響しないことを実機確認済み。
+- 許可リスト方式(外部入力を直接ptyに渡さない)・トークン認証方式は無変更。
 
-### 1. 表面分類「卸売業」と実態の乖離
-東証33業種では「卸売業」に分類されるが、実態はOA機器(複合機・ビジネスホン)のロールアップM&A(顧客承継数がITインフラ顧客累計の4割強・約2万社)と、同じ顧客基盤へのSaaS「Cloud CIRCUS」等のクロスセルを組み合わせた中小企業向けDXプラットフォーマー。直接の純粋比較対象となる上場企業は見当たらないニッチな複合モデル。
+### タスクB: index.html ボタン再構成
+- セッション巡回ボタン(1個・タップで循環)を廃止し、C1/C2/C3/C4/C5/SHの個別直行ボタン(`#sessBar`、ワンタップ直行)に再構成。
+- 現在接続中のセッションボタンに`.active`(amber背景)を付与し視覚的に強調。
+- `#sessBar`は`flex-wrap: wrap`で、iPhone幅で1段に収まらない場合は自然に2段化。
+- 既存キーバー(`#keys`/`#keys2`/`#keys3`: Esc/Tab/Ctrl/矢印/クイックキー等)は無改変。
+- JS側: 巡回用の`SESS`配列・`sessBtn`単一ボタンを廃止し、`.sess[data-session]`のDOM要素を直接参照する方式に変更(HTML側のボタン一覧が正、二重定義を回避)。
 
-### 2. 高ROE・低PERの市場評価ギャップ
-ROE27.3%・正規ROIC19.9%(自社開示株主資本コスト7.1%比+12.8pt、価値創造)と資本効率は極めて高い一方、予想PER12.3倍はプライム市場平均15倍を下回る。中期経営計画資料内で会社自身が「PERでの市場評価の底上げが課題」と明言しており、市場の見落とし(過小評価)の可能性がある一方、成長率が緩やか(+7.1%)なための評価ディスカウントという合理的な側面もある。
+### タスクC: CLAUDE.md 儀式の追記(既存記述は削除せず追記のみ)
+1. 銘柄分析タスクの完了報告は`/tmp/report_{code}.md`→`~/handoff/report_{code}.md`(銘柄別ファイル化、例: report_7740.md)。システム・実装タスクは従来どおり`report.md`を使う(本タスク自体がこれに該当)。
+2. 並走時の注意: vault/handoffへのpushは直前にpull。index.lockエラーやpush rejectが出たら数秒待ってリトライする。
 
-### 3. 累進配当5年で約9倍
-1株配当が2022年3月期14円→2026年3月期145円(記念配当8円含む)と5年で約9倍化。配当性向55%目安+累進配当方針を継続、将来的なDOE目標導入も検討中。
+## 確認結果
+- **バックアップ**: 変更前に`server.py.bak`/`index.html.bak`を作成済み(`.gitignore`の`*.bak`で追跡対象外・ロールバック用に残置)。
+- **WebSocket接続テスト**(Python `websockets`ライブラリで6セッション+異常系を検証): claude/claude2/claude3/claude4/claude5/shellの全6セッションでauth成功・接続維持を確認。許可リスト外セッション名(`nope`)はclose code 4400、不正トークンはclose code 4401で正しく拒否されることを確認。
+- **tmux確認**: `tmux list-sessions`で既存のclaude(作成日May 17)・claude2(Jul 2)・shell(Jul 4)の作成日時が変わらず(=破壊されていない)残存。新規claude3/4/5は初回接続時に作成され、`tmux display-message -p -t <name> '#{pane_current_path}'`で全て`/home/ubuntu/obsidian-vault`であることを確認(SESSION_CWD通り)。
+- **配信確認**: `curl -o /dev/null -w '%{http_code}'` で index.html が200を返すことを確認。UIの実機タップ確認(6ボタンの押しやすさ・active強調の見え方)はケンジがiPhoneで別途実施予定。
+- **CLAUDE.md diff**: `git diff`で追記2行のみ(既存記述の削除・変更なし)であることを確認。
+- **不可侵領域の遵守**: 作業中に`dashboard/manual_links.json`等port 8081系のjson差分が別プロセスにより検出されたが、一切ステージング・コミットせず未変更のまま維持(本タスクの変更対象外)。
+- **サービス反映**: `hyena_svc.sh restart hyena-term.service`で再起動、`systemctl status`でActive(running)を確認。
 
-### 4. 隠れテーマ探索はノーヒット
-「国家プロジェクト/特許/先端材料/防衛/海洋資源」の1検索でヒットなし(能動探索したが該当なしと明記)。ロールアップM&Aという事業モデル自体はコア0「強み・モート」で扱ったが、隠れテーマの定義には該当しないため銘柄固有テーマモジュールは非発火。
-
-### 5. 10バガー判定は3/6で不認定
-時価総額(<$500B)・創業者CEO(本郷秀之氏、1996年創業から現任・筆頭株主25.52%)・黒字化はtrueだが、売上成長率+7.1%(+30%要件未達)・モート★★★(★★★★要件未達)・パラダイムシフト捕捉も該当せずfalse。テーブルAを適用。
-
-## judgment
-維持(新規ウォッチ登録・押し目待ち) — v5.5必須評価は国籍=日本(通常)・カントリー=低・倫理=投資OK・hyena_distance=通常エントリー対象(P4過熱条項も非該当)。ただし現値3,085円は52週高値3,135円から▲1.6%の高値圏でフィボ打診買い水準(2,840円・0.5戻し)に未到達のため、押し目待ちとした。
-
-## 未確認項目
-補助3件(LTV/CAC具体数値、機関投資家コンセンサス目標株価、直接の同業純粋比較対象のPER/PBR)
-
-## 制約の遵守
-- 数値はJ-Quants・決算短信・決算補足資料・中期経営計画の一次資料に基づく
-- 一次資料で確認できない項目は`[要確認]`と明記
-- 機密情報は含まれていない
-
-## commit
-- obsidian-vault(3393ノート追加、PR#125 squash merge後のmain): `5b2a483`
-- obsidian-vault(セッション引き継ぎ追記): `420da6e`
+## commit hash
+- phase3-repo(server.py・index.html): `7e430ac`(main反映)
+- obsidian-vault(CLAUDE.md追記): `3c51755`(main反映)
+- obsidian-vault(セッション引き継ぎ追記): `09da89e`(main反映)
 
 ## ロールバック手順
-- ノートを取り消す場合: `git -C ~/obsidian-vault revert 5b2a483`(単一ファイル追加のコミットのため安全にrevert可能)
-- セッション引き継ぎの追記のみ取り消す場合: `git -C ~/obsidian-vault revert 420da6e`
+- phase3-repo側を戻す場合: `git -C ~/phase3/phase3-repo revert 7e430ac` の後 `hyena_svc.sh restart hyena-term.service`(または`.bak`ファイルを`cp`で復元してから再起動)。
+- CLAUDE.md追記のみ戻す場合: `git -C ~/obsidian-vault revert 3c51755`
+- セッション引き継ぎの追記のみ戻す場合: `git -C ~/obsidian-vault revert 09da89e`
+
+## 機密の記載
+なし(トークン・.env値・Webhook URL等は本報告にも変更内容にも一切含まれない)

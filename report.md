@@ -1,45 +1,36 @@
-# 完了報告: hyena-term 5セッション化＋SH独立ボタン＋handoff銘柄別ファイル化(2026-07-11)
+# 完了報告: hyena-term 後勝ち接続(-D)＋切断時クリーンアップ(2026-07-11)
 
 ## 対象
-phase3-repo/webterm(server.py・index.html)＋obsidian-vault/CLAUDE.md。銘柄分析を最大5並列で走らせるための基盤整備(【自走指示・確認不要】)。port 8081系ダッシュボードは不可侵の指示どおり未変更。
+phase3-repo/webterm/server.pyのみ(【自走指示・確認不要】)。直前の5セッション化タスクの副作用で発覚した、WS切断時のtmuxアタッチ子プロセス残留(ゾンビ化)・新規接続即切断の修正。
 
-## 実装要点・差分要約
+## 背景・原因
+- `tmux new -A -s <session>`は既存アタッチクライアントを残したまま新規クライアントを追加attachするため、ブラウザのタブ再読込・再接続のたびにtmuxクライアント(pty子プロセス)が積み上がる。
+- WS切断時のクリーンアップ(`finally`)が`loop.remove_reader`と`os.close(fd)`のみで、**pty子プロセスへの`os.waitpid()`が一度も呼ばれていなかった**。子プロセス(tmuxクライアント)は自然終了しても親(uvicornサーバー)が回収しないため、defunct(ゾンビ)のまま残留する。
+- 実機確認: 修正前の状態でclaudeセッション配下に**40件超のdefunct(tmux: client)** を確認(`ps -eo pid,ppid,stat,cmd`)。
 
-### タスクA: server.py セッション拡張
-- `SESSIONS`許可リスト(3本: claude/claude2/shell)を`SESSION_CWD`マッピング(6本)に拡張:
-  claude→`~/phase3/phase3-repo`、claude2〜5→`~/obsidian-vault`(分析用・スキル自動発動圏)、shell→`~`。`SESSIONS = set(SESSION_CWD)`で許可リストを維持。
-- pty子プロセスの`tmux new -A -s <session>`に`-c SESSION_CWD[session]`を追加。`-c`は新規作成時のみ有効で既存セッション(claude/claude2/shell)のattachには影響しないことを実機確認済み。
-- 許可リスト方式(外部入力を直接ptyに渡さない)・トークン認証方式は無変更。
-
-### タスクB: index.html ボタン再構成
-- セッション巡回ボタン(1個・タップで循環)を廃止し、C1/C2/C3/C4/C5/SHの個別直行ボタン(`#sessBar`、ワンタップ直行)に再構成。
-- 現在接続中のセッションボタンに`.active`(amber背景)を付与し視覚的に強調。
-- `#sessBar`は`flex-wrap: wrap`で、iPhone幅で1段に収まらない場合は自然に2段化。
-- 既存キーバー(`#keys`/`#keys2`/`#keys3`: Esc/Tab/Ctrl/矢印/クイックキー等)は無改変。
-- JS側: 巡回用の`SESS`配列・`sessBtn`単一ボタンを廃止し、`.sess[data-session]`のDOM要素を直接参照する方式に変更(HTML側のボタン一覧が正、二重定義を回避)。
-
-### タスクC: CLAUDE.md 儀式の追記(既存記述は削除せず追記のみ)
-1. 銘柄分析タスクの完了報告は`/tmp/report_{code}.md`→`~/handoff/report_{code}.md`(銘柄別ファイル化、例: report_7740.md)。システム・実装タスクは従来どおり`report.md`を使う(本タスク自体がこれに該当)。
-2. 並走時の注意: vault/handoffへのpushは直前にpull。index.lockエラーやpush rejectが出たら数秒待ってリトライする。
+## 実装要点・差分要約(phase3-repo/webterm/server.py)
+1. **tmux起動コマンドに`-D`追加**: `tmux new -A -s <session> -c <dir>` → `tmux new -A -D -s <session> -c <dir>`。`-D`はアタッチ時に既存クライアントをデタッチしてから新規クライアントがアタッチする指定で、同一セッションへの再接続・端末乗り換えで常に「後勝ち」になる。
+2. **`_terminate_child(pid, grace=1.5)`を新設**: WS切断時のfinallyから呼び出す。forkpty()の子はsetsidで新セッションリーダーになりpid==pgidになる性質を利用し、`os.killpg(pid, SIGTERM)`→0.1秒刻みで`os.waitpid(pid, WNOHANG)`を最大1.5秒ポーリング→未終了なら`os.killpg(pid, SIGKILL)`→`os.waitpid(pid, 0)`で確実に終了・回収する。`ProcessLookupError`/`ChildProcessError`(既に終了・別経路で回収済み)は握りつぶして安全に抜ける。
+3. **`pump()`に能動close処理を追加**: pty側がEOFになった(子プロセス終了 or `-D`で他クライアントにデタッチされた)ことを検知した際、`await ws.close()`を能動的に呼ぶよう変更。旧実装ではこの検知後もブラウザ側WebSocketは開いたままで、出力だけ止まって画面が固まる(切断と気付けない)状態になっていた。能動closeにより、index.html側の既存自動再接続ロジックが正しく発火するようになった。
+4. 認証方式・`SESSION_CWD`マッピング・許可リスト方式は無変更。
 
 ## 確認結果
-- **バックアップ**: 変更前に`server.py.bak`/`index.html.bak`を作成済み(`.gitignore`の`*.bak`で追跡対象外・ロールバック用に残置)。
-- **WebSocket接続テスト**(Python `websockets`ライブラリで6セッション+異常系を検証): claude/claude2/claude3/claude4/claude5/shellの全6セッションでauth成功・接続維持を確認。許可リスト外セッション名(`nope`)はclose code 4400、不正トークンはclose code 4401で正しく拒否されることを確認。
-- **tmux確認**: `tmux list-sessions`で既存のclaude(作成日May 17)・claude2(Jul 2)・shell(Jul 4)の作成日時が変わらず(=破壊されていない)残存。新規claude3/4/5は初回接続時に作成され、`tmux display-message -p -t <name> '#{pane_current_path}'`で全て`/home/ubuntu/obsidian-vault`であることを確認(SESSION_CWD通り)。
-- **配信確認**: `curl -o /dev/null -w '%{http_code}'` で index.html が200を返すことを確認。UIの実機タップ確認(6ボタンの押しやすさ・active強調の見え方)はケンジがiPhoneで別途実施予定。
-- **CLAUDE.md diff**: `git diff`で追記2行のみ(既存記述の削除・変更なし)であることを確認。
-- **不可侵領域の遵守**: 作業中に`dashboard/manual_links.json`等port 8081系のjson差分が別プロセスにより検出されたが、一切ステージング・コミットせず未変更のまま維持(本タスクの変更対象外)。
-- **サービス反映**: `hyena_svc.sh restart hyena-term.service`で再起動、`systemctl status`でActive(running)を確認。
+- **バックアップ**: 変更前に`server.py.bak.2`を作成(既存の`server.py.bak`は前回タスクの巻き戻し用として温存)。`.gitignore`の`*.bak`パターンで追跡対象外。
+- **構文チェック**: `python3 -m py_compile server.py` 成功。
+- **後勝ち(-D)動作確認**: 未使用セッション`claude5`に2秒差で2本のWS接続を張り、1.5秒(サーバー側grace)経過後を検証。先発 close_code=1000(サーバーが能動closeで正常切断)・後発は生存(close_code=None)を確認(PASS)。
+- **残留クライアントゼロ確認**: 上記切断後`tmux list-clients -t claude5`が空(exit 0・出力なし)であることを確認。
+- **全6セッション接続確認**: claude/claude2/claude3/claude4/claude5/shellの全てで認証成功・接続確立を再確認(前回タスクの許可リストに影響なし)。
+- **ゾンビ再発なし**: 検証バッチ実行後、`ps -eo pid,ppid,stat,cmd | grep defunct`で本タスク由来の新規ゾンビが無いことを確認。修正前に存在した大量のdefunct(40件超)は、本タスク中の2回のサービス再起動で親プロセス終了→init再親化→自動回収され解消済み。無関係な別プロセス由来のゾンビ1件(2026-07-02からの手動テストサーバ、PPID別・本サービス無関係)は対象外のため未処理・報告のみ。
+- **実機への影響と自己修復の確認**: 全6セッション接続テストの過程で、本人のiPhoneが実際に接続中だった`claude`セッションを一時的に巻き込み(-Dで検知・数秒切断)したが、journalctlログでindex.html既存の自動再接続ロジックにより数秒後に自動復帰したことを確認(実害なし)。以後の追加テストは非稼働セッション(`claude5`)に限定して実施。
+- **サービス再起動・稼働確認**: `hyena_svc.sh restart hyena-term.service`を2回実行(各コード変更の都度)、`systemctl status`で`Active: active (running)`を確認。
 
 ## commit hash
-- phase3-repo(server.py・index.html): `7e430ac`(main反映)
-- obsidian-vault(CLAUDE.md追記): `3c51755`(main反映)
-- obsidian-vault(セッション引き継ぎ追記): `09da89e`(main反映)
+- phase3-repo(server.py): `fb86262`(main反映)
+- obsidian-vault(セッション引き継ぎ追記): `e1a224e`(main反映)
 
 ## ロールバック手順
-- phase3-repo側を戻す場合: `git -C ~/phase3/phase3-repo revert 7e430ac` の後 `hyena_svc.sh restart hyena-term.service`(または`.bak`ファイルを`cp`で復元してから再起動)。
-- CLAUDE.md追記のみ戻す場合: `git -C ~/obsidian-vault revert 3c51755`
-- セッション引き継ぎの追記のみ戻す場合: `git -C ~/obsidian-vault revert 09da89e`
+- server.py変更を戻す場合: `git -C ~/phase3/phase3-repo revert fb86262` の後 `hyena_svc.sh restart hyena-term.service`(または`server.py.bak.2`を`cp`で復元してから再起動)
+- セッション引き継ぎの追記のみ戻す場合: `git -C ~/obsidian-vault revert e1a224e`
 
 ## 機密の記載
 なし(トークン・.env値・Webhook URL等は本報告にも変更内容にも一切含まれない)

@@ -32,3 +32,52 @@ TDnetの公開保持期間は直近約1ヶ月のみのため、本決算から�
 
 ## commit
 - phase3-repo(fetch_kessan.py): `f90fa27`
+
+---
+
+# 完了報告: cron 30行目修復・CLI v2.1.220/Opus 5 化(2026-07-25)
+
+## 対象
+crontab 30行目の構文破損を修復し、19:00のアラートチェックを復旧。あわせて Claude Code CLI を更新。コード変更なし(phase3-repo は無変更)。
+
+## 実施(cron修復)
+- crontab 30行目が改行欠落で2エントリ連結していた
+- `run_alert_check.sh` と後続の `20 18 * * 1-5 ...` が `run_alert_check.sh20` という不正コマンド名になっていた
+- このため19:00のアラートチェックが実行されていなかった
+- cron.log に `/bin/sh: 1: //home/ubuntu/phase3/run_alert_check.sh20: not found` が15回記録。最終エラーは07-24 19:00
+- 修復方法: nano編集は1行目にゴミが混入して bad minute で失敗した
+- 正解手順は `crontab -l` のバックアップを `sed '30c\...'` で加工し `crontab cron.new` で適用する方式
+- 修復後の30行目: `0 19 * * 1-5 /home/ubuntu/phase3/run_alert_check.sh >> /home/ubuntu/phase3/cron.log 2>&1`
+- 手動実行は exit=0 だがログに痕跡なし(フラグで即抜けたと推測)
+- 真の確認は2026-07-26以降の19:00自動実行を待つ
+
+## 訂正
+- 07-20(月)の screening 出力欠落は cron 障害ではなかった
+- 実際は海の日の祝日スキップ(screening.py の休場ガード)であり、設計どおりの正常動作
+- 根拠は cron.log の `[2026-07-20] 市場休場のためスキップ` の1行
+- 当初「cron失敗の可能性」と判断したのは誤り
+
+## 環境更新
+- Claude Code を v2.1.198 → v2.1.220 に更新
+- Opus 5 が /model ピッカーに出現(バージョン不足が原因だった)
+- 現在のC1: Opus 5 / xhigh effort / Claude Max
+- Opus 5 では effort のリセットが起きない(xhigh が引き継がれた)
+- Fable 5 が Max プラン標準化。週次上限の最大50%まで、Opus 4.8 より消費が速い
+- claude.ai 側は Opus 5 が選択可能。CLI との表示ラグは `claude update` で解消する
+
+## 新規PENDING(未着手)
+- screening の GitHub push が常態的に失敗している
+- cron.log に `! [rejected] main -> main (fetch first)` が出ている
+- commit は成功するが push で弾かれ、後から手動マージで回収されている
+- 証跡: git log の「origin/main マージ」が 07-19・07-25 に出現
+- Slack には「送信完了」と表示されるため失敗が見えない
+- 推定原因: push 前に git pull していない
+- cron.log のエラー(`not found` / `Traceback` / `rejected`)を検知して通知する仕組みが無い
+- 今回の15営業日の障害は人間が git log を眺めて偶然発見した
+
+## ロールバック手順
+- cron を戻す場合は修復前に取得した `crontab -l` のバックアップを `crontab <backup>` で再適用する
+- ただし戻すと19:00アラートチェックが再び動かなくなるため、通常は不要
+
+## commit
+- obsidian-vault(セッション引き継ぎ.md): `974b320`

@@ -81,3 +81,60 @@ crontab 30行目の構文破損を修復し、19:00のアラートチェック�
 
 ## commit
 - obsidian-vault(セッション引き継ぎ.md): `974b320`
+
+---
+
+# 完了報告: screening の push前pull追加とpush失敗のSlack通知(2026-08-01)
+
+## 対象
+phase3-repo/screening.py のみ。crontab・他のcronスクリプト・dashboard等は無変更。
+
+## 背景
+- screening の定期実行が git push で常態的にrejectされていた
+- cron.log に `! [rejected] main -> main (fetch first)` が記録される一方、Slackには「送信完了」と表示されていた
+- 原因はpush前にpullしていないこと。obsidian-vaultにはIRBANK sync・分析PRマージ等の他系統pushが日常的に入るためrejectは必然
+
+## 対象箇所の特定
+- crontab 24行目から辿った結果、git処理は呼び出し先シェルではなく screening.py 内にあった
+- 変更前は screening.py:305-307 の `subprocess.run(["git", ...])` 3連発（add / commit / push）
+- 3つとも戻り値を一切見ておらず、直後の `print("Obsidian vault保存完了")` が無条件だったのが誤通知の原因
+
+## 実装内容
+1. `sync_vault_to_github(vault_dir, commit_msg)` を新設（screening.py:18〜、`latest_business_day` の直前）
+2. 処理順を add → commit → `git pull --rebase` → push に変更（pullをpushの直前に挿入）
+3. 各gitコマンドは `capture_output=True` で受けたうえで stdout/stderr をそのまま print し、cron.log の情報量を落とさない
+4. commitは変更なし時にrc!=0になるが正常系として扱い、後続のpull/pushを継続する
+5. pull --rebase が失敗した場合、`.git/rebase-merge` `.git/rebase-apply` の有無で rebase進行中かを判定する
+6. rebase進行中なら `git rebase --abort` で中断し、pushせずに `(False, 理由)` を返す（強制解決・force pushは一切しない）
+7. 戻り値 `(push_ok, detail)` を呼び出し側に伝播
+
+## 終了ステータスの伝播
+- 成功時: `Obsidian vault保存完了（GitHub反映済み）: {md_path}`
+- 失敗時: `Obsidian vault保存はローカルcommitのみ・GitHub未反映: {md_path} / {detail}`
+- Slack成功時: 従来どおり `📊 *v5.2 1次スクリーニング結果 ...*`
+- Slack失敗時: `⚠️ *... （GitHub未反映）*` + 理由 + 「ローカルcommitのみ。手動で pull --rebase → push が必要。」
+- あわせて Slack POST 自体の応答も判定し、非2xxなら `Slack通知送信失敗: HTTP {code}` を出す（同じ「失敗を成功と表示する」バグのため）
+
+## 検証結果
+- 2026-08-01は土曜のため screening.py の休場ガード（`is_business_day`）が先に効き、手動実行では git ブロックまで到達しない
+- 実行結果は `[2026-08-01] 市場休場のためスキップ` / exit 0 で、end-to-endの通常フロー実行は本日実施できていない
+- 代替として、出荷される `sync_vault_to_github` の定義をASTで screening.py から抽出してexecし、ハンドコピーではなく実物の関数を直接検証した
+- テストA(正常系): 実物のobsidian-vaultに対して実行し `push_ok=True`。nothing to commitでもpull/pushまで到達、vaultは汚れず（status --porcelain 空）
+- テストB(reject再現): bare remote＋2クローンで他系統が先にpushした状況を作り、`push_ok=True`。remoteのlogに `screening 2026-08-01` と `irbank sync` が両方載り、他系統のcommitを消していないことを確認
+- テストC(コンフリクト): 同一ファイルの add/add 衝突を作り `push_ok=False`。`rebase --abort` 実行後に rebase-merge/rebase-apply の残留なし、ローカルcommitは保持、remoteは未更新であることを確認
+- テストD: push_ok による Slack 文面分岐が成功用/失敗用に切り替わることを確認
+- `py_compile` によるsyntaxチェック通過
+- 次回の実地確認は 2026-08-03(月) 07:00 の自動実行。cron.log に `Obsidian vault保存完了（GitHub反映済み）` が出れば成功
+
+## 制約の遵守
+- crontabは未編集
+- force push なし・rebaseの強制解決なし
+- 変更は screening.py のみ。commit時に混在していた dashboard/manual_links.json・master.json・portfolio.json の既存差分は巻き込んでいない
+- /home/ubuntu/phase3/screening.py は phase3-repo/screening.py へのシンボリックリンクのため、別途の配置作業は不要
+
+## ロールバック手順
+- `git -C /home/ubuntu/phase3/phase3-repo revert 643fd95` で変更前の add/commit/push 3連発に戻る
+- ただし戻すとrejectの常態化と誤通知が再発する
+
+## commit
+- phase3-repo(screening.py): `643fd95`

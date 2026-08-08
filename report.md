@@ -309,3 +309,79 @@ FY27/3 Q1では **営業利益 131.12億円(+51.4%) / 調整後営業利益 114.
 
 ## commit
 - obsidian-vault: `5e588e3`(PR #149 squash merge・ノート追加) / `cade1d7`(セッション引き継ぎ追記)
+
+---
+
+# 完了報告: claude-workspace 整備 — 正典deny方式の確立(2026-08-08)
+
+## 対象
+obsidian-vault の Claude Code 協業環境整備（正典 deny 方式）。phase3-repo は無変更。
+
+## 背景
+- v5.5.9 で「分析用worktreeの使い回しによるコンテキスト混入」が4063信越化学の誤引用の根本原因と特定されたが、ルール文で対策しただけで物理的な残骸（worktree 実体）は残っていた
+- CLAUDE.md 等の正典ファイルを Claude が直接書き換えられる状態だった
+- `.claude/` 配下に陳腐化した .bak・死んだ許可エントリが堆積していた
+
+## 実施内容
+
+### 復帰点の確保
+- tag `pre-claude-workspace`(2303c6f) を作成しリモートへ push。作業前はタグが1本も存在しなかった
+
+### worktree 残骸の除去
+- worktree `analysis-8919` の登録を `worktree remove` + `prune` で除去（作業ツリーはクリーン、ブランチは main 包含を事前確認）
+- 実体ディレクトリ `.claude/worktrees/` を削除（rm はケンジがシェルで実行）
+- ブランチ削除2本: `handoff-update-1885`(6d5300b) / `worktree-analysis-8919`(974b320)。両方とも `merge-base --is-ancestor` で main 包含を確認済み
+- `.gitignore` に `.claude/worktrees/` を追加し、再発経路を塞いだ
+- `analysis/*` 47本は今回対象外（未着手・PENDING）
+
+### 陳腐化ファイルの除去
+- `SKILL.md.bak_20260705_roic` / `SKILL.md.bak_20260705_roicpatch` を `git rm`。git 追跡下だったため履歴（699cb9b）から復元可能
+
+### 正典保護（本件の中核）
+- `.claude/settings.json` を新設。deny 8エントリ:
+  CLAUDE.md / rules/naming.md / rules/lint.md / .claude/skills/** / .claude/settings.json（自身を含む）/ プロジェクト目次.md / 運用_同期ルール_PC-Obsidian-GitHub.md / 取り込み/**
+- deny に自分自身を含めることで、Claude が保護設定そのものを緩める経路を塞いだ
+- `rules/corrections.md` / `mistakes.md` は追記運用のため deny 対象外。改変監視は git diff レビューで担保
+
+### 90_claude/ の新設
+- 投資システム（銘柄分析/・取り込み/・戦略・記録/）と無関係な調査・思考・協業ノートのレーン
+- README を配置（命名 `YYYY-MM-DD_トピック名.md`、frontmatter 4項目: title/created/tags/status）
+
+### CLAUDE.md への追記（追加12行のみ・既存行の変更/削除ゼロ）
+- 「記録の置き場ルール（暫定）」に 90_claude/ の1行を追加
+- 新節「正典保護（.claude/settings.json の deny）」を追加。明示指示による正典変更は、Claude が変更案を unified diff として `90_claude/` にパッチファイルで書き出し、ケンジが内容確認の上 `git apply` する方式を明文化
+- `--numstat` で 12 insertions / 0 deletions を確認
+
+### settings.local.json の掃除
+- 死んだ許可9件を削除（旧scratchpadパスの node --check 3件 + /tmp/webterm_check系6件）。参照先は9件すべて既に消滅していることを実測確認
+- allow エントリ 32 → 23件。`diff -u` で削除9行・追加0行を確認
+- `.claude/settings.local.json.bak_*` を gitignore 化
+- 追跡済みだった `bak_20260613` を `git rm --cached` で untrack（ローカル実体は残存）
+
+## 検証結果
+- 新セッション（フラグなし）で機械的テストを実施
+- `90_claude/` への作成 → **通過**
+- `CLAUDE.md` への Edit ツール実行 → **ブロック**。拒否文言は "File is in a directory that is denied by your permission settings."。2回試行で再現
+- 対照群の `セッション引き継ぎ.md` → **通過**（deny 対象外が巻き込まれていないことを確認）
+- deny に阻まれた際、Claude が CLAUDE.md の正典保護節を読んで自発的にパッチ方式へ切り替えることも確認
+- テスト生成物3件はケンジがシェルで削除済み、status clean 確認済み
+
+## 既知の注意
+- 拒否文言は directory 表記だが、実挙動はファイル単位
+- PC 側クローン（C:\Users\kenzi\obsidian-vault）は次回 pull で deny が有効化される
+- PC 側に古い `pre-claude-workspace` タグが残っていれば、`git tag -d pre-claude-workspace` + `git fetch --tags` で整合させる
+- `.claude/settings.json` の deny は現行セッションには反映されない。効果確認には新セッションの起動が必要
+
+## 復帰点・ロールバック
+- 復帰点: tag `pre-claude-workspace`(2303c6f、リモート保全済み)
+- ロールバック: `git -C ~/obsidian-vault revert c03b794`
+- ブランチ復元が必要な場合: `git branch handoff-update-1885 6d5300b` / `git branch worktree-analysis-8919 974b320`
+- .bak スキル復元: `git checkout 699cb9b -- .claude/skills/v5.3-stock-analysis/SKILL.md.bak_20260705_roic`
+
+## 残 PENDING
+- `analysis/*` 旧分析ブランチ47本の掃除（全て main マージ済みか確認の上で一括削除するか残すか、ケンジ判断）
+- PC 側クローンの pull 実施とタグ整合確認
+- Google スプレッドシート連携（サービスアカウント + mcp-google-sheets）は別スレッド扱いで保留継続
+
+## commit
+- obsidian-vault: `c03b794`（7 files changed, 51 insertions(+), 1205 deletions(-)）
